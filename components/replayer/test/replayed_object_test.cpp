@@ -431,6 +431,32 @@ TEST(ReplayedObjectTest, FlushAndCommitAppliesPropertyChange)
 }
 
 /// @test
+/// A snapshot whose fixed-size property differs only in VALUE (not byte length)
+/// is applied. Regression for the change-detect bug where `size != && memcmp !=`
+/// skipped fixed-size properties (spatial, forceIdentifier, damageState, …) that
+/// can only ever differ in content — stranding stationary entities at their
+/// stale value under keyframe-driven (fast/stepped-clock) replay.
+TEST(ReplayedObjectTest, SnapshotAppliesContentOnlyChangeToFixedSizeProperty)
+{
+  ReplayedObjectSetup setup;
+  auto creationSnapshot = setup.findCreationSnapshot();
+  auto keyframeSnapshot = setup.findKeyframeSnapshot();
+  auto obj = makeObject(creationSnapshot, makeTime(1));
+  const auto* prop = findPropertyByName(*obj, "testProp");
+  const auto creationValue = obj->getPropertyUntyped(prop).getCopyAs<float64_t>();
+
+  // Drive testProp (a fixed-size float64) to a different value.
+  injectFlushCommit(*obj, makeTime(5), setup.findPropertyChange());
+  ASSERT_DOUBLE_EQ(obj->getPropertyUntyped(prop).getCopyAs<float64_t>(), 12.3);
+  ASSERT_NE(creationValue, 12.3);  // the keyframe value must really differ
+
+  // The keyframe carries testProp == creationValue — same 8-byte length as the
+  // current 12.3, different bytes. The old `&&` skipped it; the fix applies it.
+  injectFlushCommit(*obj, makeTime(9), keyframeSnapshot);
+  EXPECT_DOUBLE_EQ(obj->getPropertyUntyped(prop).getCopyAs<float64_t>(), creationValue);
+}
+
+/// @test
 /// Rejects mutable operations on replayed objects
 /// requirements(SEN-364)
 TEST(ReplayedObjectTest, RemoveTypedConnectionThrowsLogicError)

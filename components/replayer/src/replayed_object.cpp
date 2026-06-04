@@ -436,8 +436,16 @@ void ReplayedObject::inject(TimeStamp entryTime, const db::Snapshot& snapshot)
 
         const auto& currentBuffer = bufferCache_.find(prop->getId())->second;
 
-        // check if the property has changed, and store the change if needed
-        if (currentBuffer.size() != span.size() && std::memcmp(currentBuffer.data(), span.data(), span.size()) != 0)
+        // check if the property has changed, and store the change if needed.
+        // A snapshot omits a property as an empty span (leave the cached value
+        // untouched). Otherwise the value changed when the size differs OR the
+        // bytes differ — fixed-size properties (spatial, forceIdentifier, …)
+        // only ever differ in bytes, so the size check alone never fires for
+        // them. The size-first ordering also short-circuits the memcmp when the
+        // sizes differ, so it never reads past the shorter buffer.
+        if (!span.empty()
+            && (currentBuffer.size() != span.size()
+                || std::memcmp(currentBuffer.data(), span.data(), span.size()) != 0))
         {
           auto itr = changedProperties_.find(prop.get());
           if (itr == changedProperties_.end())
