@@ -123,8 +123,12 @@ void ReplayImpl::advanceImpl(Duration time)
 
 void ReplayImpl::playImpl()
 {
-  // do nothing if already playing
-  if (getStatus() == ReplayStatus::playing)
+  // Compare against the PENDING status, not the committed one: a pause()
+  // immediately before (e.g. the pause→seek→play of a scene jump) sets
+  // nextStatus=paused but leaves the committed status at `playing` until the
+  // next cycle swap. Checking getStatus() here would then no-op play() and
+  // leave the replay frozen. getNextStatus() reflects the pause we just queued.
+  if (getNextStatus() == ReplayStatus::playing)
   {
     return;
   }
@@ -134,8 +138,8 @@ void ReplayImpl::playImpl()
 
 void ReplayImpl::pauseImpl()
 {
-  // do nothing if already paused
-  if (getStatus() == ReplayStatus::paused)
+  // do nothing if already paused (pending) — see playImpl() on why nextStatus.
+  if (getNextStatus() == ReplayStatus::paused)
   {
     return;
   }
@@ -187,15 +191,26 @@ void ReplayImpl::seekImpl(TimeStamp time)
     throwRuntimeError(err);
   }
 
+  // Apply the keyframe at/just-before `time`, then play forward to `time`,
+  // applying every entry. Walk bounded by the absolute `time` — NOT via
+  // advanceCursor(diff), which bases off getPlaybackTime() (the stale committed
+  // value, since setNextPlaybackTime only writes the pending buffer) while the
+  // keyframe entry's cursor time reads 0, so diff would be the whole target and
+  // the walk would overshoot the archive end and park the replay. `seeking_`
+  // lets the keyframe apply even though the committed status may still read
+  // `playing` (the caller's pause() hasn't swapped yet); the caller stays paused
+  // around the seek so update() doesn't advanceCursor and clobber the pending
+  // setNextPlaybackTime before it commits.
+  seeking_ = true;
   cursor_ = input_->at(maybeIndex.value());
   applyCursor();
-  setNextPlaybackTime(cursor_.get().time);
-  flushObjectsActivity();
-
-  if (auto diff = time - cursor_.get().time; diff.get() > 0)
+  for (++cursor_; !cursor_.atEnd() && cursor_.get().time <= time; ++cursor_)
   {
-    advanceCursor(diff);
+    applyCursor();
   }
+  setNextPlaybackTime(time);
+  flushObjectsActivity();
+  seeking_ = false;
 }
 
 void ReplayImpl::applyCursor()
@@ -245,8 +260,10 @@ void ReplayImpl::apply(TimeStamp time, const db::Event& value)
 
 void ReplayImpl::apply(TimeStamp time, const db::Keyframe& value)
 {
-  // do not apply keyframes while playing
-  if (getStatus() == ReplayStatus::playing)
+  // Do not apply keyframes during normal playback — but DO apply them while
+  // seeking (seekImpl rebuilds state from a keyframe even though the replay
+  // stays in `playing` status).
+  if (getStatus() == ReplayStatus::playing && !seeking_)
   {
     return;
   }

@@ -70,6 +70,10 @@ private:
   ObjectMap objects_;
   db::DataCursor cursor_;
   TimeStamp lastUpdateTime_;
+  // True only while seekImpl() rebuilds state from a keyframe, so the
+  // keyframe-apply path runs even though the committed status may still read
+  // `playing` (the caller's pause() hasn't swapped yet).
+  bool seeking_ = false;
 };
 
 }  // namespace sen::components::replayer
