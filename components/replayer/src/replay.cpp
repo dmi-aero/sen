@@ -76,6 +76,22 @@ void ReplayImpl::update(kernel::RunApi& runApi)
 
 void ReplayImpl::advanceCursor(Duration delta)
 {
+  // Safety net (defence in depth): normal pacing advances by ~one step
+  // (≤ ~50 ms) per call. An out-of-range delta means a desync (e.g. a seek that
+  // left a stale baseline) — walking + flushing the spanned slice in one call
+  // floods CPU/RAM and freezes the host. Hold position instead; update() re-bases
+  // lastUpdateTime_ to the current clock, so the next tick advances normally.
+  constexpr std::int64_t kMaxAdvanceNs = 1'000'000'000; // 1 s
+  const auto deltaNs = delta.getNanoseconds();
+  if (deltaNs > kMaxAdvanceNs || deltaNs < -kMaxAdvanceNs)
+  {
+    getLogger()->warn(
+      "ignoring out-of-range replay advance of {} ns (|Δ| > {} ns) at {} — "
+      "clock/cursor desync; holding to avoid an archive walk/rewind",
+      deltaNs, kMaxAdvanceNs, getPlaybackTime().toUtcString());
+    return;
+  }
+
   bool cursorMoved = false;
   const auto currentTime = getPlaybackTime();
   const auto nextTime = currentTime + delta;
@@ -209,6 +225,16 @@ void ReplayImpl::seekImpl(TimeStamp time)
     applyCursor();
   }
   setNextPlaybackTime(time);
+  // Reset the update() baseline so the first playing tick after the seek does NOT
+  // advanceCursor against a stale baseline. update() advances the cursor by
+  // `delta = runApi.getTime() - lastUpdateTime_`; left at its pre-seek value (or
+  // captured here from a paused clock that reports a max-time sentinel) the first
+  // delta is a bogus gap → advanceCursor walks+flushes a massive archive slice
+  // (CPU/RAM blowup) or rewinds playbackTime (stall). Zeroing it reuses the
+  // existing "first play" guard in update() (`lastUpdateTime_.sinceEpoch()==0`):
+  // that tick skips advanceCursor and re-captures the baseline from a *live*
+  // clock, so playback resumes one step at a time from the seeked cursor.
+  lastUpdateTime_ = {};
   flushObjectsActivity();
   seeking_ = false;
 }
