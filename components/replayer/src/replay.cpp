@@ -30,6 +30,8 @@
 #include "stl/sen/kernel/basic_types.stl.h"
 
 // std
+#include <cstdint>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -55,13 +57,27 @@ ReplayImpl::~ReplayImpl() { doStop(); }
 
 void ReplayImpl::update(kernel::RunApi& runApi)
 {
+  const auto now = runApi.getTime();
+
+  // Defense in depth behind the VirtualMasterClock fix (kernel_component.cpp):
+  // a paused/halted master clock can report the max-time sentinel
+  // (std::numeric_limits<int64>::max() ns). Latching it into lastUpdateTime_
+  // poisons the next delta; if the sentinel persists every tick the replay
+  // never advances (the park). Make a sentinel tick a pure no-op — no
+  // advanceCursor, no lastUpdateTime_ capture — so lastUpdateTime_ keeps its
+  // last LIVE value and the first live tick advances by a normal delta.
+  if (now.sinceEpoch().getNanoseconds() == std::numeric_limits<std::int64_t>::max())
+  {
+    return;
+  }
+
   auto nextStatus = getNextStatus();
 
   if (nextStatus == ReplayStatus::playing)
   {
     if (lastUpdateTime_.sinceEpoch().get() != 0)
     {
-      auto delta = runApi.getTime() - lastUpdateTime_;
+      auto delta = now - lastUpdateTime_;
       advanceCursor(delta);
     }
   }
@@ -70,7 +86,7 @@ void ReplayImpl::update(kernel::RunApi& runApi)
   // gets called with an updated delta time
   if (nextStatus == ReplayStatus::playing || nextStatus == ReplayStatus::paused)
   {
-    lastUpdateTime_ = runApi.getTime();
+    lastUpdateTime_ = now;
   }
 }
 
