@@ -203,8 +203,15 @@ protected:
       {
         singleStep(clocks);
 
-        // if we did not advance anything, we are done
-        if (stepDuration_.getNanoseconds() == 0)
+        // if we did not advance anything, we are done. stepDuration_ stays at
+        // its sentinel (numeric_limits::max(), set in singleStep) when NO clock
+        // produced a next step. Folding that into elapsedVirtualTime saturates
+        // the master clock time, so getTime() then returns the sentinel and
+        // every consumer (the replayer especially) latches a poison baseline and
+        // parks. Treat both 0 (immediate step) and the sentinel (no step) as
+        // "nothing more this window": advance the full requested duration.
+        const auto stepNs = stepDuration_.getNanoseconds();
+        if (stepNs == 0 || stepNs == std::numeric_limits<Duration::ValueType>::max())
         {
           elapsedVirtualTime = duration;
           break;
